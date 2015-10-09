@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
-var request = require('request')
-  , Q = require('q')
-  
-  , URL_BASE = 'https://wwws.mint.com/'
-  , USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.153 Safari/537.36'
-  , BROWSER = 'chrome'
-  , BROWSER_VERSION = 35
-  , OS_NAME = 'mac';
+var request = require('request');
+var Q = require('q');
+var rp = require('request-promise');
+var URL_BASE = 'https://wwws.mint.com/';
+var USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.153 Safari/537.36';
+var BROWSER = 'chrome';
+var BROWSER_VERSION = 35;
+var OS_NAME = 'mac';
 
 
 module.exports = Prepare;
@@ -15,7 +15,7 @@ module.exports.setHttpService = SetHttpService;
 
 // default http service factory
 var _requestService = function(args) {
-    return request.defaults(args);
+    return rp.defaults(args);
 };
 
 /**
@@ -26,14 +26,9 @@ var _requestService = function(args) {
  * });
  */
 function Prepare(email, password) {
-    return Q.Promise(function(resolve, reject) {
-        var mint = new PepperMint();
-        _login(mint, email, password, function(err) {
-            if (err) return reject(err);
+    var mint = new PepperMint();
 
-            resolve(mint);
-        });
-    });
+    return _login(mint, email, password);
 }
 
 /**
@@ -42,7 +37,7 @@ function Prepare(email, password) {
  *  for some reason), you can provide a new one here.
  *
  * @param service the Factory for the http service. Called
- *  with {jar: cookieJar}, where the cookieJar is a 
+ *  with {jar: cookieJar}, where the cookieJar is a
  *  request-compatible object containing the cookie jar.
  */
 function SetHttpService(service) {
@@ -66,17 +61,17 @@ function _jsonify(promise) {
 }
 
 /* non-public login util function, so the credentials aren't saved on any object */
-function _login(mint, email, password, callback) {
+function _login(mint, email, password) {
     // get user pod (!?)
     // initializes some cookies, I guess;
-    //  it does not appear to be necessary to 
+    //  it does not appear to be necessary to
     //  load login.event?task=L
     return mint._form('getUserPod.xevent', {
         username: email
     })
     .then(function(json) {
         // save the pod number (or whatever) in a cookie
-        var cookie = request.cookie('mintPN=' + json.mintPN);
+        var cookie = rp.cookie('mintPN=' + json.mintPN);
         mint.jar.setCookie(cookie, URL_BASE);
 
         // finally, login
@@ -91,17 +86,14 @@ function _login(mint, email, password, callback) {
     })
     .then(function(json) {
         if (json.error && json.error.vError)
-            return callback(new Error(json.error.vError.copy));
+            throw new Error(json.error.vError.copy);
 
         if (!(json.sUser && json.sUser.token))
-            return callback(new Error("Unable to obtain token"));
+            throw new Error("Unable to obtain token");
 
         mint.token = json.sUser.token;
-        callback(null, mint);
+        return mint;
     })
-    .fail(function(err) {
-        callback(err);
-    });
 }
 
 /**
@@ -110,30 +102,33 @@ function _login(mint, email, password, callback) {
 function PepperMint() {
     this.requestId = 42; // magic number? random number?
 
-    this.jar = request.jar();
-    this.request = _requestService({jar: this.jar});
+    this.jar = rp.jar();
+    this.rp = _requestService({jar: this.jar});
+}
+
+PepperMint.prototype.download = function() {
+  return this._get('/transactionDownload.event');
 }
 
 /**
  * Returns a promise that fetches accounts
  */
 PepperMint.prototype.getAccounts = function() {
-    var self = this;
-    return self._jsonForm({
+    return this._jsonForm({
         args: {
             types: [
-                "BANK", 
-                "CREDIT", 
-                "INVESTMENT", 
-                "LOAN", 
-                "MORTGAGE", 
-                "OTHER_PROPERTY", 
-                "REAL_ESTATE", 
-                "VEHICLE", 
+                "BANK",
+                "CREDIT",
+                "INVESTMENT",
+                "LOAN",
+                "MORTGAGE",
+                "OTHER_PROPERTY",
+                "REAL_ESTATE",
+                "VEHICLE",
                 "UNCLASSIFIED"
             ]
-        }, 
-        service: "MintAccountService", 
+        },
+        service: "MintAccountService",
         task: "getAccountsSorted"
     });
 };
@@ -164,7 +159,7 @@ PepperMint.prototype.getTags = function() {
  * }
  */
 PepperMint.prototype.getTransactions = function(args) {
-    
+
     args = args || {};
     var offset = args.offset || 0;
     return this._getJsonData({
@@ -251,28 +246,17 @@ PepperMint.prototype.deleteTransaction = function(transactionId) {
     });
 };
 
-
-
 /*
  * Util methods
  */
 
 PepperMint.prototype._get = function(url, qs) {
-    var request = this.request;
-    return Q.Promise(function(resolve, reject) {
-        var fullUrl = URL_BASE + url;
-        var args = {url: fullUrl};
-        if (qs)
-            args.qs = qs;
-
-        request(args, function(err, response, body) {
-            if (err) return reject(err);
-            if (200 != response.statusCode)
-                return reject(new Error("Failed to load " + fullUrl));
-
-            resolve(body);
-        });
-    });
+    var rp = this.rp;
+    var fullUrl = URL_BASE + url;
+    var args = {url: fullUrl};
+    if (qs)
+        args.qs = qs;
+    return rp(args);
 };
 
 PepperMint.prototype._getJson = function(url, qs) {
@@ -293,31 +277,19 @@ PepperMint.prototype._getJsonData = function(args) {
 
 
 PepperMint.prototype._form = function(url, form) {
-    var request = this.request;
-    return _jsonify(Q.Promise(function(resolve, reject) {
-        var fullUrl = URL_BASE + url;
-        request({
-            url: fullUrl
-          , method: 'POST'
-          , form: form
-          , headers: {
-                Accept: 'application/json'
-              , 'User-Agent': USER_AGENT
-              , 'X-Request-With': 'XMLHttpRequest'
-              , 'X-NewRelic-ID': 'UA4OVVFWGwEGV1VaBwc='
-              , 'Referrer': 'https://wwws.mint.com/login.event?task=L&messageId=1&country=US&nextPage=overview.event'
-            }
-        }, function(err, response, body) {
-            if (err) return reject(err);
-            if (response.statusCode > 204) {
-                var error = new Error("Failed to load " + fullUrl);
-                error.response = response;
-                error.body = body;
-                return reject(error);
-            }
-
-            resolve(body);
-        });
+    var rp = this.rp;
+    var fullUrl = URL_BASE + url;
+    return _jsonify(rp({
+        url: fullUrl
+      , method: 'POST'
+      , form: form
+      , headers: {
+            // Accept: 'application/json'
+          // , 'User-Agent': USER_AGENT
+          // , 'X-Request-With': 'XMLHttpRequest'
+          // , 'X-NewRelic-ID': 'UA4OVVFWGwEGV1VaBwc='
+          // , 'Referrer': 'https://wwws.mint.com/login.event?task=L&messageId=1&country=US&nextPage=overview.event'
+        }
     }));
 };
 
@@ -341,4 +313,3 @@ PepperMint.prototype._jsonForm = function(json) {
 PepperMint.prototype._random = function() {
     return new Date().getTime();
 };
-
